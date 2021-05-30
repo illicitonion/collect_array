@@ -147,80 +147,161 @@ impl<T, const N: usize> core::iter::FromIterator<T> for CollectArrayResult<T, N>
     }
 }
 
-#[test]
-fn ok() {
-    let input = vec![0_i32, 1_i32, 2_i32];
-
-    let output = input.into_iter().collect::<CollectArrayResult<_, 3>>();
-    assert_eq!(output, CollectArrayResult::Ok([0, 1, 2]));
-}
-
-#[test]
-fn want_more() {
-    let input = vec![0_i32, 1_i32, 2_i32];
-
-    let output = input.into_iter().collect::<CollectArrayResult<_, 4>>();
-    assert_eq!(
-        output,
-        CollectArrayResult::NotEnoughElements {
-            values: [
-                MaybeUninit::new(0),
-                MaybeUninit::new(1),
-                MaybeUninit::new(2),
-                MaybeUninit::uninit()
-            ],
-            init_count: 3
+impl<T, const N: usize> Drop for CollectArrayResult<T, N> {
+    fn drop(&mut self) {
+        match self {
+            Self::NotEnoughElements { values, init_count } => {
+                for i in 0..*init_count {
+                    let value = core::mem::replace(&mut values[i], MaybeUninit::uninit());
+                    drop(unsafe { value.assume_init() });
+                }
+            }
+            Self::Ok(_) => {
+                // Automatically handled
+            }
+            Self::TooManyElements {
+                values: _,
+                next_value: _,
+            } => {
+                // Automatically handled
+            }
         }
-    );
-}
-
-#[test]
-fn want_fewer() {
-    let input = vec![0_i32, 1_i32, 2_i32];
-
-    let output = input.into_iter().collect::<CollectArrayResult<_, 2>>();
-    let want_arr = [0_i32, 1_i32];
-    let want_next = 2_i32;
-    if let CollectArrayResult::TooManyElements {
-        values,
-        next_value: next,
-    } = output
-    {
-        assert_eq!(values, want_arr);
-        assert_eq!(next, want_next);
-    } else {
-        let want: CollectArrayResult<_, 2> = CollectArrayResult::TooManyElements {
-            values: want_arr,
-            next_value: want_next,
-        };
-        panic!(
-            "Saw wrong elements; expected {:?} but saw {:?}",
-            want, output
-        );
     }
 }
 
-#[test]
-fn debug() {
-    assert_eq!(
-        "[0, 1, 2]",
-        format!("{:?}", CollectArrayResult::Ok([0, 1, 2]))
-    );
+#[cfg(test)]
+mod test {
+    use crate::CollectArrayResult;
+    use core::mem::MaybeUninit;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
-    let not_enough: CollectArrayResult<_, 4> = vec![0, 1, 2].into_iter().collect();
-    assert_eq!(
-        "CollectArrayResult::NotEnoughElements{ got: 3, expected: 4, values: [0, 1, 2] }",
-        format!("{:?}", not_enough)
-    );
+    #[test]
+    fn ok() {
+        let input = vec![0_i32, 1_i32, 2_i32];
 
-    assert_eq!(
-        "CollectArrayResult::TooManyElements{ values: [0, 1], next: 2 (possibly others...) }",
-        format!(
-            "{:?}",
-            CollectArrayResult::TooManyElements {
-                values: [0, 1],
-                next_value: 2
+        let output = input.into_iter().collect::<CollectArrayResult<_, 3>>();
+        assert_eq!(output, CollectArrayResult::Ok([0, 1, 2]));
+    }
+
+    #[test]
+    fn want_more() {
+        let input = vec![0_i32, 1_i32, 2_i32];
+
+        let output = input.into_iter().collect::<CollectArrayResult<_, 4>>();
+        assert_eq!(
+            output,
+            CollectArrayResult::NotEnoughElements {
+                values: [
+                    MaybeUninit::new(0),
+                    MaybeUninit::new(1),
+                    MaybeUninit::new(2),
+                    MaybeUninit::uninit()
+                ],
+                init_count: 3
             }
-        )
-    );
+        );
+    }
+
+    #[test]
+    fn want_fewer() {
+        let input = vec![0_i32, 1_i32, 2_i32];
+
+        let output = input.into_iter().collect::<CollectArrayResult<_, 2>>();
+        let want_arr = [0_i32, 1_i32];
+        let want_next = 2_i32;
+        if let CollectArrayResult::TooManyElements {
+            values,
+            next_value: next,
+        } = output
+        {
+            assert_eq!(values, want_arr);
+            assert_eq!(next, want_next);
+        } else {
+            let want: CollectArrayResult<_, 2> = CollectArrayResult::TooManyElements {
+                values: want_arr,
+                next_value: want_next,
+            };
+            panic!(
+                "Saw wrong elements; expected {:?} but saw {:?}",
+                want, output
+            );
+        }
+    }
+
+    #[test]
+    fn debug() {
+        assert_eq!(
+            "[0, 1, 2]",
+            format!("{:?}", CollectArrayResult::Ok([0, 1, 2]))
+        );
+
+        let not_enough: CollectArrayResult<_, 4> = vec![0, 1, 2].into_iter().collect();
+        assert_eq!(
+            "CollectArrayResult::NotEnoughElements{ got: 3, expected: 4, values: [0, 1, 2] }",
+            format!("{:?}", not_enough)
+        );
+
+        assert_eq!(
+            "CollectArrayResult::TooManyElements{ values: [0, 1], next: 2 (possibly others...) }",
+            format!(
+                "{:?}",
+                CollectArrayResult::TooManyElements {
+                    values: [0, 1],
+                    next_value: 2
+                }
+            )
+        );
+    }
+
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn drop_ok() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+
+        let ok: CollectArrayResult<_, 3> = vec![
+            DropCounter(drop_count.clone()),
+            DropCounter(drop_count.clone()),
+            DropCounter(drop_count.clone()),
+        ]
+        .into_iter()
+        .collect();
+        drop(ok);
+
+        assert_eq!(3, Arc::try_unwrap(drop_count).unwrap().into_inner());
+    }
+
+    #[test]
+    fn drop_too_many() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+
+        let ok: CollectArrayResult<_, 1> = vec![
+            DropCounter(drop_count.clone()),
+            DropCounter(drop_count.clone()),
+            DropCounter(drop_count.clone()),
+        ]
+        .into_iter()
+        .collect();
+        drop(ok);
+
+        assert_eq!(3, Arc::try_unwrap(drop_count).unwrap().into_inner());
+    }
+
+    #[test]
+    fn drop_not_enough() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+
+        let ok: CollectArrayResult<_, 3> =
+            vec![DropCounter(drop_count.clone())].into_iter().collect();
+        drop(ok);
+
+        assert_eq!(1, Arc::try_unwrap(drop_count).unwrap().into_inner());
+    }
 }
