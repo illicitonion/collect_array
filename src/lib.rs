@@ -13,7 +13,7 @@
 #![cfg_attr(not(test), no_std)]
 
 use core::{
-    mem::{self, MaybeUninit},
+    mem::{self, forget, MaybeUninit},
     ptr,
 };
 
@@ -135,6 +135,20 @@ where
 
 impl<T, const N: usize> core::iter::FromIterator<T> for CollectArrayResult<T, N> {
     fn from_iter<It: IntoIterator<Item = T>>(it: It) -> Self {
+        struct PanicDropper<'a, T> {
+            init: &'a mut [MaybeUninit<T>],
+        }
+
+        impl<'a, T> Drop for PanicDropper<'a, T> {
+            fn drop(&mut self) {
+                let init_slice = ptr::slice_from_raw_parts_mut(
+                    self.init.as_mut_ptr() as *mut T,
+                    self.init.len(),
+                );
+                unsafe { ptr::drop_in_place(init_slice) }
+            }
+        }
+
         // TODO: Use MaybeUninit::uninit_array or [MaybeUninit::<T>::uninit(); N] when either stabilises.
         let mut values: [MaybeUninit<T>; N] =
             unsafe { MaybeUninit::<[MaybeUninit<T>; N]>::uninit().assume_init() };
@@ -144,8 +158,14 @@ impl<T, const N: usize> core::iter::FromIterator<T> for CollectArrayResult<T, N>
         let mut iter = it.into_iter();
 
         while added < N {
-            if let Some(value) = iter.next() {
-                values[added] = MaybeUninit::new(value);
+            let (init, uninit) = values.split_at_mut(added);
+
+            let panic_dropper = PanicDropper { init };
+            let next = iter.next();
+            forget(panic_dropper);
+
+            if let Some(value) = next {
+                uninit[0] = MaybeUninit::new(value);
                 added += 1;
             } else {
                 break;
@@ -173,10 +193,9 @@ impl<T, const N: usize> Drop for CollectArrayResult<T, N> {
     fn drop(&mut self) {
         match self {
             Self::NotEnoughElements { values, init_count } => {
-                for i in 0..*init_count {
-                    let value = core::mem::replace(&mut values[i], MaybeUninit::uninit());
-                    drop(unsafe { value.assume_init() });
-                }
+                let init_slice =
+                    ptr::slice_from_raw_parts_mut(values.as_mut_ptr() as *mut T, *init_count);
+                unsafe { ptr::drop_in_place(init_slice) }
             }
             Self::Ok(_) => {
                 // Automatically handled
@@ -328,6 +347,50 @@ mod test {
     }
 
     #[test]
+    fn drop_panic_during_collection() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+
+        let result = panic::catch_unwind(|| {
+            let mut first = true;
+            std::iter::from_fn(|| {
+                if first {
+                    first = false;
+                    Some(DropCounter(drop_count.clone()))
+                } else {
+                    panic!("Panic'd on construction")
+                }
+            })
+            .collect::<CollectArrayResult<_, 2>>()
+        });
+
+        assert!(result.is_err());
+
+        assert_eq!(1, drop_count.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn drop_panic_too_many() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+
+        let result = panic::catch_unwind(|| {
+            let mut first = true;
+            std::iter::from_fn(|| {
+                if first {
+                    first = false;
+                    Some(DropCounter(drop_count.clone()))
+                } else {
+                    panic!("Panic'd on construction")
+                }
+            })
+            .collect::<CollectArrayResult<_, 1>>()
+        });
+
+        assert!(result.is_err());
+
+        assert_eq!(1, drop_count.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn unwrap_ok() {
         let drop_count = Arc::new(AtomicUsize::new(0));
 
@@ -374,7 +437,7 @@ mod test {
                 .collect::<CollectArrayResult<_, 3>>()
                 .unwrap()
         });
-        
+
         assert!(ok.is_err());
 
         assert_eq!(1, Arc::try_unwrap(drop_count).unwrap().into_inner());
