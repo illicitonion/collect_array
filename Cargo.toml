@@ -1,6 +1,6 @@
 [package]
 name = "collect_array"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Daniel Wagner-Hall <dawagner@gmail.com>"]
 edition = "2018"
 description = "Allows for collecting an Iterator into an exactly sized array."

@@ -12,7 +12,10 @@
 
 #![cfg_attr(not(test), no_std)]
 
-use core::mem::MaybeUninit;
+use core::{
+    mem::{self, MaybeUninit},
+    ptr,
+};
 
 /// The result of collecting an Iterator into an exactly-sized array, or having failed to.
 ///
@@ -40,6 +43,25 @@ pub enum CollectArrayResult<T, const N: usize> {
         /// How many elements in `values` are init.
         init_count: usize,
     },
+}
+
+impl<T, const N: usize> CollectArrayResult<T, N> {
+    /// Returns the contained [`Ok`](Self::Ok) value, consuming the self value.
+    pub fn unwrap(mut self) -> [T; N] {
+        let a = match &mut self {
+            Self::Ok(a) => unsafe { ptr::read(a) },
+            Self::TooManyElements { .. } => {
+                panic!("called `CollectArrayResult::unwrap` with too many elements")
+            }
+            Self::NotEnoughElements { .. } => {
+                panic!("called `CollectArrayResult::unwrap` without enough elements")
+            }
+        };
+
+        mem::forget(self);
+
+        a
+    }
 }
 
 impl<T, const N: usize> PartialEq<CollectArrayResult<T, N>> for CollectArrayResult<T, N>
@@ -174,7 +196,7 @@ mod test {
     use crate::CollectArrayResult;
     use core::mem::MaybeUninit;
     use core::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::{panic, sync::Arc};
 
     #[test]
     fn ok() {
@@ -301,6 +323,59 @@ mod test {
         let ok: CollectArrayResult<_, 3> =
             vec![DropCounter(drop_count.clone())].into_iter().collect();
         drop(ok);
+
+        assert_eq!(1, Arc::try_unwrap(drop_count).unwrap().into_inner());
+    }
+
+    #[test]
+    fn unwrap_ok() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+
+        let ok = vec![
+            DropCounter(drop_count.clone()),
+            DropCounter(drop_count.clone()),
+            DropCounter(drop_count.clone()),
+        ]
+        .into_iter()
+        .collect::<CollectArrayResult<_, 3>>()
+        .unwrap();
+        drop(ok);
+
+        assert_eq!(3, Arc::try_unwrap(drop_count).unwrap().into_inner());
+    }
+
+    #[test]
+    fn unwrap_too_many() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+
+        let ok = panic::catch_unwind(|| {
+            vec![
+                DropCounter(drop_count.clone()),
+                DropCounter(drop_count.clone()),
+                DropCounter(drop_count.clone()),
+            ]
+            .into_iter()
+            .collect::<CollectArrayResult<_, 1>>()
+            .unwrap()
+        });
+
+        assert!(ok.is_err());
+
+        assert_eq!(3, Arc::try_unwrap(drop_count).unwrap().into_inner());
+    }
+
+    #[test]
+    fn unwrap_not_enough() {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+
+        let ok = panic::catch_unwind(|| {
+            vec![DropCounter(drop_count.clone())]
+                .into_iter()
+                .collect::<CollectArrayResult<_, 3>>()
+                .unwrap()
+        });
+        
+        assert!(ok.is_err());
 
         assert_eq!(1, Arc::try_unwrap(drop_count).unwrap().into_inner());
     }
