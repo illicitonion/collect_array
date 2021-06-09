@@ -1,0 +1,27 @@
+name: miri
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 18 * * *"
+jobs:
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Fetch toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          components: miri
+      - name: Run tests in miri
+        uses: actions-rs/cargo@v1
+        with:
+          command: miri
+          args: test
+          toolchain: nightly
