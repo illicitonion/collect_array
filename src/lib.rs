@@ -374,7 +374,8 @@ mod test {
                 .collect::<CollectArrayResult<_, 3>>()
                 .unwrap()
         });
-        drop(ok);
+        
+        assert!(ok.is_err());
 
         assert_eq!(1, Arc::try_unwrap(drop_count).unwrap().into_inner());
     }
